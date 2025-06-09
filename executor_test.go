@@ -978,3 +978,63 @@ func TestBreakFromPartialCircularDependency(t *testing.T) {
 		t.Error("Expected cancel error")
 	}
 }
+
+func TestCustomConflictRate(t *testing.T) {
+	t.Parallel()
+	rand.New(rand.NewSource(0))
+
+	// Fixed parameters as requested
+	totalTxs := []int{200}
+	numReads := []int{200}
+	numWrites := []int{200}
+	numNonIO := []int{500}
+
+	// Test different conflict rates: 50%, 60%, 70%, 80%, 90%, 100%
+	conflictRates := []float64{0.5, 0.6, 0.7, 0.8, 0.9, 1.0}
+
+	checks := composeValidations([]PropertyCheck{checkNoStatusOverlap, checkNoDroppedTx})
+
+	fmt.Println("=== Custom Conflict Rate Test Results ===")
+
+	for _, conflictRate := range conflictRates {
+		fmt.Printf("\n--- Testing Conflict Rate: %.0f%% ---\n", conflictRate*100)
+
+		taskRunner := func(numTx int, numRead int, numWrite int, numNonIO int) (time.Duration, time.Duration) {
+			// Calculate number of unique senders based on conflict rate
+			// Higher conflict rate = fewer unique senders = more conflicts
+			numUniqueSenders := int(float64(numTx) * (1.0 - conflictRate))
+			if numUniqueSenders < 1 {
+				numUniqueSenders = 1
+			}
+			if numUniqueSenders > numTx {
+				numUniqueSenders = numTx
+			}
+
+			sender := func(i int) common.Address {
+				// Distribute transactions among limited number of senders
+				senderIdx := i % numUniqueSenders
+				return common.BigToAddress(big.NewInt(int64(senderIdx)))
+			}
+
+			tasks, serialDuration := taskFactory(numTx, sender, numRead, numWrite, numNonIO, randomPathGenerator, readTime, writeTime, nonIOTime)
+
+			parallelDuration := runParallel(t, tasks, checks, false)
+
+			// Log individual result
+			performance := greenTick
+			if parallelDuration >= serialDuration {
+				performance = redCross
+			}
+
+			speedup := float64(serialDuration) / float64(parallelDuration)
+			efficiency := (float64(serialDuration) - float64(parallelDuration)) / float64(serialDuration) * 100
+
+			fmt.Printf("Conflict Rate: %.0f%%, Unique Senders: %d, Parallel: %v, Serial: %v, Speedup: %.2fx, Efficiency: %.1f%% %s\n",
+				conflictRate*100, numUniqueSenders, parallelDuration, serialDuration, speedup, efficiency, performance)
+
+			return parallelDuration, serialDuration
+		}
+
+		testExecutorComb(t, totalTxs, numReads, numWrites, numNonIO, taskRunner)
+	}
+}
